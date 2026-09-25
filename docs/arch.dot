@@ -1,0 +1,37 @@
+digraph G {
+  rankdir=TB; nodesep=0.45; ranksep=0.6;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, fillcolor="#ffffff", color="#333333"];
+  edge [fontname="Helvetica", fontsize=9, color="#444444"];
+  graph [fontname="Helvetica", fontsize=12, labeljust=l];
+
+  subgraph cluster_user {
+    label="USER (trusted)"; style="filled"; fillcolor="#eef6ee"; color="#27ae60";
+    user [label="User at terminal\ntypes master password\n(no echo, getpass)"];
+  }
+
+  subgraph cluster_proc {
+    label="sfm PROCESS (trusted while running) - keys exist ONLY here, in memory"; style="filled"; fillcolor="#e8f4e8"; color="#1e8449";
+    cli [label="CLI layer (cli.py)\nargparse, input validation,\ngeneric errors, exit codes"];
+    ks [label="Keystore module\nArgon2id: password -> KEK\nKEK unwraps Master Key", fillcolor="#fff3c4", color="#b7950b"];
+    ff [label="File format module\nper-file DEK, wrapped by MK\nstreaming AES-256-GCM chunks", fillcolor="#fff3c4", color="#b7950b"];
+    fio [label="Safe file I/O (fileio.py)\nO_NOFOLLOW, regular files only,\ntemp file 0600 + atomic publish"];
+    mem [label="In memory only:\npassword, KEK, MK, DEK\n(bytearray, wiped after use,\ncore dumps disabled)", shape=note, fillcolor="#fde8e8", color="#c0392b"];
+  }
+
+  subgraph cluster_disk {
+    label="FILESYSTEM (untrusted: can be read, stolen or modified)"; style="dashed,filled"; fillcolor="#e8eef8"; color="#2e5c9a";
+    ksf [label="~/.config/sfm/keystore.json (0600)\nsalt, Argon2id params,\nwrapped Master Key", shape=note];
+    plain [label="Plaintext files\n(user input / decrypted output)", shape=folder];
+    enc [label="Encrypted .sfm files (0600)\nheader: file id, wrapped DEK, nonces\nbody: authenticated chunks", shape=folder];
+  }
+
+  user -> cli [label="commands + password", color="#c0392b", penwidth=1.5];
+  cli -> ks;
+  cli -> ff;
+  ks -> ksf [label="read / write", dir=both];
+  ks -> ff [label="Master Key", style=dashed];
+  ff -> fio;
+  fio -> plain [label="read / write\nplaintext", dir=both];
+  fio -> enc [label="read / write\nciphertext", dir=both];
+  mem -> ks [style=dotted, arrowhead=none];
+}

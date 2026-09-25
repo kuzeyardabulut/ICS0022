@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "securefm"
+version = "0.1.0"
+description = "Secure command-line file encryption and management tool"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=46,<47",
+    "argon2-cffi>=25.1,<26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pip-audit>=2"]
+
+[project.scripts]
+sfm = "sfm.cli:main"
+
+[tool.setuptools]
+packages = ["sfm"]
