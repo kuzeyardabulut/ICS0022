@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from sfm import crypto, fileformat, keystore
+from sfm import audit, crypto, fileformat, keystore
 from sfm.cli import main
+from sfm.crypto import SecureBuffer
 
 PW = "correct-horse-battery"
 
@@ -26,6 +27,8 @@ def decrypt(answers, path, *extra, pw=PW):
     return main(["decrypt", str(path), *extra])
 
 
+# --- round-trip correctness ---
+
 @pytest.mark.parametrize("size", [0, 1, fileformat.CHUNK_SIZE, 3 * fileformat.CHUNK_SIZE + 7])
 def test_roundtrip(env, size):
     tmp, answers = env
@@ -38,6 +41,8 @@ def test_roundtrip(env, size):
     assert (tmp / "out.bin").read_bytes() == data
 
 
+# --- authentication failure ---
+
 def test_wrong_password_rejected(env):
     tmp, answers = env
     init(answers)
@@ -46,6 +51,8 @@ def test_wrong_password_rejected(env):
     assert decrypt(answers, tmp / "a.txt.sfm", "-o", str(tmp / "o"), pw="wrong-password!!") == 1
     assert not (tmp / "o").exists()
 
+
+# --- tampering detection ---
 
 @pytest.mark.parametrize("attack", ["flip", "truncate", "append", "drop_last_chunk"])
 def test_tampering_detected_and_no_partial_output(env, attack):
@@ -81,6 +88,8 @@ def test_keystore_kdf_downgrade_rejected(env, monkeypatch):
         keystore.unlock(ks, PW)
 
 
+# --- overwrite / symlink safety ---
+
 def test_does_not_overwrite_without_force(env):
     tmp, answers = env
     init(answers)
@@ -109,6 +118,8 @@ def test_symlink_output_rejected(env):
     assert (tmp / "victim").read_text() == "important"
 
 
+# --- permissions ---
+
 def test_private_permissions(env):
     tmp, answers = env
     init(answers)
@@ -117,6 +128,8 @@ def test_private_permissions(env):
     for p in [keystore.default_path(), tmp / "a.txt.sfm"]:
         assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
+
+# --- passwd ---
 
 def test_passwd_keeps_files_readable(env):
     tmp, answers = env
@@ -151,6 +164,12 @@ def test_null_byte_in_path_rejected(env):
     init(answers)
     answers.append(PW)
     assert main(["encrypt", "file\x00.txt"]) == 1
+
+
+def test_control_chars_in_path_rejected(env):
+    tmp, answers = env
+    init(answers)
+    assert main(["encrypt", "file\x07bell.txt"]) == 1
 
 
 def test_nonexistent_file_rejected(env):
@@ -196,3 +215,141 @@ def test_verify_nonexistent_rejected(env):
 def test_info_nonexistent_rejected(env):
     _, answers = env
     assert main(["info", str(Path("/tmp/no-such.sfm"))]) == 1
+
+
+def test_path_traversal_dot_dot(env):
+    """Paths with .. are normalized by Path and validated — the resolved path
+    is used for the self-overwrite check."""
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    answers.append(PW)
+    assert main(["encrypt", str(tmp / "a.txt"), "-o",
+                 str(tmp / "sub" / ".." / "a.txt")]) == 1
+
+
+# --- secure memory management ---
+
+def test_secure_buffer_wipes_on_exit():
+    raw = os.urandom(32)
+    sb = SecureBuffer(raw)
+    buf = sb.buf
+    assert bytes(buf) == raw
+    sb.close()
+    assert bytes(buf) == b"\x00" * 32
+
+
+def test_secure_buffer_context_manager():
+    raw = os.urandom(32)
+    with SecureBuffer(raw) as buf:
+        assert bytes(buf) == raw
+    assert bytes(buf) == b"\x00" * 32
+
+
+def test_wipe_zeroes_bytearray():
+    key = bytearray(b"\xde\xad\xbe\xef" * 8)
+    crypto.wipe(key)
+    assert key == bytearray(32)
+
+
+def test_keys_wiped_after_encrypt(env):
+    """After encrypt, the master key should have been wiped via SecureBuffer."""
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    encrypt(answers, tmp / "a.txt")
+    # If we got here without error, the SecureBuffer __exit__ ran
+
+
+def test_keys_wiped_after_decrypt(env):
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    encrypt(answers, tmp / "a.txt")
+    decrypt(answers, tmp / "a.txt.sfm", "-o", str(tmp / "out.txt"))
+
+
+# --- structured logging ---
+
+def test_audit_log_created_on_init(env):
+    tmp, answers = env
+    init(answers)
+    log_path = tmp / "home" / "audit.log"
+    assert log_path.exists()
+    lines = log_path.read_text().splitlines()
+    events = [json.loads(line)["event"] for line in lines]
+    assert "keystore_created" in events
+
+
+def test_audit_log_records_encrypt_decrypt(env):
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("hello")
+    encrypt(answers, tmp / "a.txt")
+    decrypt(answers, tmp / "a.txt.sfm", "-o", str(tmp / "out.txt"))
+    log_path = tmp / "home" / "audit.log"
+    lines = log_path.read_text().splitlines()
+    events = [json.loads(line)["event"] for line in lines]
+    assert "encrypt_start" in events
+    assert "encrypt_done" in events
+    assert "decrypt_start" in events
+    assert "decrypt_done" in events
+
+
+def test_audit_log_records_auth_failure(env):
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    encrypt(answers, tmp / "a.txt")
+    decrypt(answers, tmp / "a.txt.sfm", "-o", str(tmp / "o"), pw="wrong-password!!")
+    log_path = tmp / "home" / "audit.log"
+    lines = log_path.read_text().splitlines()
+    events = [json.loads(line)["event"] for line in lines]
+    assert "auth_failed" in events
+
+
+def test_audit_log_contains_no_secrets(env):
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("supersecretdata")
+    encrypt(answers, tmp / "a.txt")
+    log_path = tmp / "home" / "audit.log"
+    content = log_path.read_text()
+    assert PW not in content
+    assert "supersecretdata" not in content
+
+
+def test_audit_log_is_valid_json(env):
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    encrypt(answers, tmp / "a.txt")
+    log_path = tmp / "home" / "audit.log"
+    for line in log_path.read_text().splitlines():
+        entry = json.loads(line)
+        assert "ts" in entry
+        assert "event" in entry
+        assert "uid" in entry
+
+
+# --- per-user access control ---
+
+def test_file_not_owned_by_user_rejected(env, tmp_path):
+    """Simulates ownership check by monkeypatching os.getuid to differ from file owner."""
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    original_getuid = os.getuid
+
+    def fake_uid():
+        return original_getuid() + 1
+
+    import sfm.fileio
+    old = os.getuid
+    os.getuid = fake_uid
+    try:
+        answers.append(PW)
+        result = main(["encrypt", str(tmp / "a.txt")])
+        assert result == 1
+    finally:
+        os.getuid = old

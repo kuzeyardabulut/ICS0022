@@ -81,9 +81,10 @@ pip-audit          # known-vulnerable dependencies
 sfm/cli.py         argument parsing, password prompts, error handling
 sfm/keystore.py    master-key wrapping with Argon2id + AES-256-GCM
 sfm/fileformat.py  .sfm file format, streaming chunked AES-256-GCM
-sfm/fileio.py      safe file handling (O_NOFOLLOW, temp files, atomic publish)
-sfm/crypto.py      the only module that calls crypto libraries
-tests/             pytest suite
+sfm/fileio.py      safe file handling (O_NOFOLLOW, temp files, atomic publish, ownership checks)
+sfm/crypto.py      the only module that calls crypto libraries (SecureBuffer, mlock)
+sfm/audit.py       structured JSON audit logging
+tests/             pytest suite (37 tests)
 docs/              architecture diagram
 ```
 
@@ -98,7 +99,8 @@ and disables core dumps, but this is best effort.
 
 - [x] Checkpoint 1: design, threat model, repository, working core with tests
 - [x] Checkpoint 2: core requirements implemented — CLI, encryption, auth, input validation
-- [ ] Next: directory encryption, hardening, security testing
+- [x] Checkpoint 3: near-final — secure memory, logging, access control, full tests, draft report
+- [ ] Next: final polish, security testing
 
 ## Progress notes
 

@@ -13,10 +13,11 @@ no password hash is stored separately.
 """
 import base64
 import json
+import logging
 import os
 from pathlib import Path
 
-from . import crypto
+from . import audit, crypto
 from .errors import AuthError, SFMError
 from .fileio import atomic_write_bytes
 
@@ -35,6 +36,15 @@ def _b64d(s): return base64.b64decode(s, validate=True)
 
 def _aad(kdf: dict) -> bytes:
     return json.dumps({"version": VERSION, "kdf": kdf}, sort_keys=True).encode()
+
+
+def _check_keystore_owner(path: Path) -> None:
+    try:
+        st = path.stat()
+        if st.st_uid != os.getuid():
+            raise SFMError("access denied: you do not own this keystore")
+    except FileNotFoundError:
+        pass
 
 
 def create(path: Path, password: str, kdf_params=None) -> None:
@@ -58,6 +68,7 @@ def _write(path: Path, kdf: dict, mk: bytearray, password: str) -> None:
 
 
 def _load(path: Path) -> dict:
+    _check_keystore_owner(path)
     try:
         doc = json.loads(path.read_text())
         kdf = doc["kdf"]
@@ -83,6 +94,8 @@ def unlock(path: Path, password: str) -> bytearray:
     try:
         mk = crypto.open_(kek, _b64d(doc["wrap"]["nonce"]), _b64d(doc["wrap"]["ct"]), _aad(kdf))
     except crypto.InvalidTag:
+        audit.log_event("auth_failed", level=logging.WARNING,
+                        reason="wrong master password or keystore was modified")
         raise AuthError("wrong master password or keystore was modified") from None
     finally:
         crypto.wipe(kek)
@@ -98,4 +111,3 @@ def change_password(path: Path, old: str, new: str) -> None:
         _write(path, kdf, mk, new)
     finally:
         crypto.wipe(mk)
-

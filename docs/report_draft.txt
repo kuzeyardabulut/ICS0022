@@ -1,0 +1,197 @@
+securefm - Draft Report
+=======================
+
+1. Introduction
+---------------
+
+securefm (sfm) is a command-line tool for encrypting and decrypting files on
+a local machine. It was built as a Secure Programming course project to
+demonstrate applied cryptography, secure memory handling, input validation,
+access control and audit logging in a real-world-shaped application.
+
+The tool encrypts files with AES-256-GCM using a unique random key per file.
+Each file key is wrapped with a master key stored in a keystore, which is
+itself encrypted with a key derived from the user's master password via
+Argon2id. This design means changing the master password does not require
+re-encrypting any files.
+
+Target users are individuals who want to encrypt sensitive files at rest on
+their own machines. The tool is not designed for sharing encrypted files
+between users or for protecting against an attacker with root access to the
+running machine.
+
+
+2. Implementation
+-----------------
+
+2.1 Architecture
+
+The project is structured into six modules, each with a single responsibility:
+
+  cli.py        - Argument parsing, password prompts, input validation,
+                  error handling. The only module that interacts with the user.
+
+  crypto.py     - All cryptographic operations (AES-256-GCM, Argon2id, CSPRNG,
+                  SecureBuffer with mlock). No other module calls crypto
+                  libraries directly.
+
+  keystore.py   - Master key storage. The master key is wrapped with a
+                  key-encryption key derived from the master password.
+                  Ownership checks ensure only the keystore owner can access it.
+
+  fileformat.py - The .sfm binary file format. Streaming chunked AES-256-GCM
+                  with authenticated headers, counters and last-chunk flags.
+
+  fileio.py     - Safe file I/O: O_NOFOLLOW to reject symlinks, TOCTOU-safe
+                  ownership checks via fstat, atomic writes via temp files,
+                  private (0600) permissions on all outputs.
+
+  audit.py      - Structured JSON audit logging of all security-relevant events.
+
+2.2 Cryptographic Design
+
+  Password -> Key:   Argon2id (t=3, m=64MiB, p=4) derives a 256-bit KEK
+                     from the master password and a random 128-bit salt.
+                     Parameters are validated against OWASP minimums on load.
+
+  Master Key:        A random 256-bit key stored in the keystore, wrapped
+                     with AES-256-GCM(KEK). The KDF parameters are bound as
+                     associated data so tampering with them breaks unwrapping.
+
+  File Encryption:   Each file gets a random 256-bit DEK, wrapped with the
+                     master key. The file is split into 64 KiB chunks, each
+                     sealed with AES-256-GCM using nonce = 8-byte random
+                     prefix || 4-byte counter. The header, counter and a
+                     last-chunk flag are bound as AAD to every chunk, which
+                     detects reordering, truncation, and appended data.
+
+2.3 Secure Memory Management
+
+  - All keys are stored in bytearray objects (mutable, wipeable) rather than
+    immutable bytes.
+  - The SecureBuffer context manager wraps key material, calls mlock(2) to
+    prevent swapping to disk, and guarantees zeroing + munlock on exit.
+  - Core dumps are disabled at startup via setrlimit(RLIMIT_CORE, 0).
+  - Keys are held in memory only for the duration of a single command.
+  - Python's immutable strings and garbage collector mean this is best-effort
+    (documented as a known limitation).
+
+2.4 Input Validation and Sanitization
+
+  - Paths are checked for null bytes, control characters, excessive length
+    (>4096), and empty strings before any operation.
+  - File existence is verified before prompting for a password, so no key
+    material is derived for invalid input.
+  - Path traversal: resolved paths are compared to prevent self-overwrite
+    via .. components.
+  - Double-encryption prevention: encrypting a .sfm file is rejected.
+  - Output directory existence is verified before the operation starts.
+  - No shell commands are ever invoked (no subprocess, no os.system), so
+    command injection is not possible by design.
+  - Symlinks are rejected at the OS level (O_NOFOLLOW) on both input and
+    output paths.
+
+2.5 Structured Logging
+
+  - Every security-relevant event (keystore creation, encrypt/decrypt
+    start/finish, authentication failures, password changes, command errors)
+    is logged as a JSON line to ~/.config/sfm/audit.log.
+  - Each log entry includes a timestamp, event type, UID and command, but
+    NEVER includes passwords, keys or plaintext data.
+  - The log file is created with 0600 permissions.
+  - Tests verify that no secrets appear in the log.
+
+2.6 Per-User Access Control
+
+  - File ownership is checked on the open file descriptor (via fstat, not
+    the path) to prevent TOCTOU races.
+  - The running user must own any file being encrypted or decrypted.
+  - The keystore file is checked for ownership before loading.
+  - Output files are created with mode 0600 (owner-only read/write).
+
+2.7 Error Handling
+
+  - All expected errors are caught and printed as generic messages via
+    SFMError. No stack traces, internal paths or data are ever shown.
+  - AuthError and IntegrityError are subclasses of SFMError, so the user
+    sees the same generic format for all failure modes.
+  - Unexpected exceptions produce "unexpected internal error" with no detail.
+
+
+3. Security Analysis
+--------------------
+
+3.1 Threat Model
+
+The tool protects against:
+
+  T1. Unauthorized file access: Files at rest are encrypted with AES-256-GCM.
+      Without the keystore and master password, decryption is infeasible.
+
+  T2. Weak passwords: Argon2id with high cost parameters makes brute-force
+      expensive. Passwords must be at least 12 characters and pass a basic
+      weakness check.
+
+  T3. Tampered ciphertext: AES-256-GCM authenticates every chunk. The
+      authenticated header, counter and last-chunk flag detect modification,
+      reordering, truncation and appended data.
+
+  T4. KDF downgrade: The KDF parameters are authenticated as AAD when
+      wrapping the master key, and validated against minimums when loading.
+
+  T5. Symlink attacks: O_NOFOLLOW prevents following symlinks on both input
+      and output. Output symlinks are also checked before writing.
+
+  T6. Partial plaintext leaks: Decrypted output is written to a temp file
+      and published atomically only after all chunks authenticate. Failures
+      leave no plaintext on disk.
+
+  T7. Key material in memory: SecureBuffer + mlock keeps keys out of swap.
+      Core dumps are disabled. Keys are wiped after each command.
+
+  T8. Multi-user access: File ownership is checked on every operation.
+      The keystore is owner-only.
+
+The tool does NOT protect against:
+
+  - An attacker with root access or a keylogger on the running machine.
+  - Secure deletion of the original plaintext file (unreliable on modern
+    filesystems and SSDs).
+  - Side-channel attacks on the AES-256-GCM implementation.
+
+3.2 Known Limitations
+
+  - Python cannot guarantee memory erasure (immutable bytes, GC copies).
+    The mlock + wipe approach is best-effort.
+  - The audit log could be tampered with by someone with write access to
+    the log file. A production tool would use append-only logging or a
+    remote syslog.
+  - File metadata (name, size, timestamps) is not encrypted. An observer
+    can see that a file exists and its approximate size.
+
+3.3 Dependencies
+
+  - cryptography (pyca): provides AES-256-GCM. Widely audited, FIPS-capable.
+  - argon2-cffi: Python binding for the reference Argon2 implementation.
+  - Both are checked for known vulnerabilities with pip-audit.
+
+
+4. Conclusion
+-------------
+
+securefm implements a complete file encryption workflow with defense in depth:
+strong authenticated encryption (AES-256-GCM), a memory-hard KDF (Argon2id),
+secure memory handling (SecureBuffer, mlock, wipe, no core dumps), strict
+input validation (null bytes, control chars, path traversal, symlinks),
+per-user access control (ownership checks on file descriptors), structured
+audit logging (JSON, no secrets), and safe file handling (atomic writes,
+no partial plaintext, private permissions).
+
+The test suite (37 tests) covers encryption correctness at multiple file
+sizes, all four tampering scenarios, authentication failure paths, input
+validation edge cases, memory wiping, audit log contents and ownership
+checks.
+
+The main areas for future improvement are: directory encryption support,
+secure deletion where the OS allows it, and moving the audit log to an
+append-only or remote destination.

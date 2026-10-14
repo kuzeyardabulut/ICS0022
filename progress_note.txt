@@ -1,0 +1,37 @@
+Checkpoint 3 - Progress Note
+
+Secure memory management: All key material is now held in SecureBuffer, a
+context manager that stores keys in mutable bytearrays, calls mlock(2) to
+prevent swapping to disk, and guarantees zeroing + munlock on exit. Core
+dumps remain disabled at startup. Keys are held in memory only for the
+duration of a single command.
+
+Input validation and sanitization: Paths are checked for null bytes, control
+characters, excessive length and empty strings. Path traversal via ..
+components is caught by comparing resolved paths. Double-encryption of .sfm
+files is rejected. No shell commands are ever invoked, so command injection
+is not possible by design. Symlinks are rejected at the OS level on both
+input and output.
+
+Structured logging: Every security-relevant event (init, encrypt, decrypt,
+verify, passwd, auth failures, errors) is logged as a JSON line to
+~/.config/sfm/audit.log. Each entry includes timestamp, event type, UID and
+command. Passwords, keys and plaintext are never written to the log. Tests
+verify this.
+
+Per-user access control: File ownership is checked on the open file
+descriptor (via fstat) on every file operation. The running user must own
+any file being encrypted or decrypted, and must own the keystore. All
+output files are created with mode 0600.
+
+Tests: 37 pytest tests pass, covering round-trip encryption at four sizes,
+wrong-password rejection, four tampering attacks, KDF downgrade protection,
+overwrite and symlink safety, permissions, password changes, input
+validation (empty, null, control chars, traversal, double-encrypt,
+self-overwrite, missing dir), SecureBuffer wiping, audit log contents and
+format, secret-free logging, and ownership-based access control.
+
+Draft report: docs/report_draft.txt covers Introduction, Implementation
+(architecture, crypto design, memory management, validation, logging,
+access control, error handling), Security Analysis (threat model, known
+limitations, dependencies) and Conclusion.

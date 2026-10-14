@@ -5,6 +5,7 @@ Low-level cryptographic primitives. All crypto goes through this module.
   * AEAD: AES-256-GCM (pyca/cryptography) - everything else
   * RNG:  os.urandom / secrets (OS CSPRNG)
 """
+import ctypes
 import os
 
 from argon2.low_level import Type, hash_secret_raw
@@ -15,10 +16,56 @@ KEY_SIZE = 32
 NONCE_SIZE = 12
 TAG_SIZE = 16
 
-# Default Argon2id cost (~0.5 s on a laptop). Minimums are enforced when a
-# keystore is loaded so an attacker cannot downgrade them by editing the file.
 DEFAULT_KDF = {"t": 3, "m": 65536, "p": 4}      # m in KiB -> 64 MiB
 MIN_KDF = {"t": 2, "m": 19456, "p": 1}          # OWASP minimum for Argon2id
+
+try:
+    _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    _mlock = _libc.mlock
+    _munlock = _libc.munlock
+except OSError:
+    _mlock = None
+    _munlock = None
+
+
+def _lock_memory(buf: bytearray) -> bool:
+    if _mlock is None or len(buf) == 0:
+        return False
+    addr = (ctypes.c_char * len(buf)).from_buffer(buf)
+    return _mlock(ctypes.addressof(addr), len(buf)) == 0
+
+
+def _unlock_memory(buf: bytearray) -> None:
+    if _munlock is None or len(buf) == 0:
+        return
+    try:
+        addr = (ctypes.c_char * len(buf)).from_buffer(buf)
+        _munlock(ctypes.addressof(addr), len(buf))
+    except (ValueError, BufferError):
+        pass
+
+
+class SecureBuffer:
+    """Context manager that holds key material in a bytearray, mlocks it,
+    and wipes + munlocks on exit."""
+
+    def __init__(self, data: bytes | bytearray):
+        self._buf = bytearray(data)
+        _lock_memory(self._buf)
+
+    @property
+    def buf(self) -> bytearray:
+        return self._buf
+
+    def __enter__(self):
+        return self._buf
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def close(self):
+        wipe(self._buf)
+        _unlock_memory(self._buf)
 
 
 def random_bytes(n: int) -> bytes:
@@ -47,4 +94,4 @@ def wipe(buf: bytearray) -> None:
 
 
 __all__ = ["InvalidTag", "derive_kek", "seal", "open_", "wipe", "random_bytes",
-           "KEY_SIZE", "NONCE_SIZE", "TAG_SIZE", "DEFAULT_KDF", "MIN_KDF"]
+           "SecureBuffer", "KEY_SIZE", "NONCE_SIZE", "TAG_SIZE", "DEFAULT_KDF", "MIN_KDF"]
