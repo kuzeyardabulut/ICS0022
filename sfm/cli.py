@@ -14,6 +14,7 @@ environment variables, so they don't end up in shell history or `ps` output.
 import argparse
 import getpass
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from .fileio import open_input, safe_output
 
 MIN_PASSWORD_LEN = 12
 COMMON = {"password1234", "123456789012", "qwertyuiop12", "passwordpassword"}
+MAX_PATH_LEN = 4096
 
 
 def _harden_process():
@@ -33,6 +35,38 @@ def _harden_process():
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     except (ImportError, ValueError, OSError):
         pass
+
+
+def _validate_path(raw: str, *, must_exist: bool = False, check_parent: bool = False) -> Path:
+    if not raw or not raw.strip():
+        raise SFMError("file path must not be empty")
+    if "\x00" in raw:
+        raise SFMError("file path contains null bytes")
+    if len(raw) > MAX_PATH_LEN:
+        raise SFMError(f"file path exceeds {MAX_PATH_LEN} characters")
+    path = Path(raw)
+    if must_exist and not path.exists():
+        raise SFMError(f"{path}: file not found")
+    if check_parent:
+        parent = path.parent if str(path.parent) != "." else Path(".")
+        if not parent.exists():
+            raise SFMError(f"{parent}: output directory does not exist")
+    return path
+
+
+def _resolve_output(src_path: Path, output_arg: str | None, suffix: str) -> Path:
+    if output_arg:
+        out = _validate_path(output_arg, check_parent=True)
+    elif suffix and src_path.suffix == suffix:
+        out = src_path.with_suffix("")
+    elif suffix:
+        raise SFMError("cannot guess output name, use -o OUT")
+    else:
+        out = src_path.with_name(src_path.name + ".sfm")
+        _validate_path(str(out), check_parent=True)
+    if out.resolve() == src_path.resolve():
+        raise SFMError("output path must differ from input path")
+    return out
 
 
 def _ask_password(prompt="Master password: ") -> str:
@@ -64,8 +98,10 @@ def cmd_init(args):
 
 
 def cmd_encrypt(args):
-    src_path = Path(args.file)
-    out = Path(args.output) if args.output else src_path.with_name(src_path.name + ".sfm")
+    src_path = _validate_path(args.file, must_exist=True)
+    if src_path.suffix == ".sfm":
+        raise SFMError(f"{src_path}: file is already encrypted (has .sfm extension)")
+    out = _resolve_output(src_path, args.output, "")
     mk = keystore.unlock(_keystore_path(args), _ask_password())
     try:
         with open_input(src_path) as src, safe_output(out, args.force) as dst:
@@ -77,17 +113,10 @@ def cmd_encrypt(args):
 
 
 def cmd_decrypt(args):
-    src_path = Path(args.file)
-    if args.output:
-        out = Path(args.output)
-    elif src_path.suffix == ".sfm":
-        out = src_path.with_suffix("")
-    else:
-        raise SFMError("cannot guess output name, use -o OUT")
+    src_path = _validate_path(args.file, must_exist=True)
+    out = _resolve_output(src_path, args.output, ".sfm")
     mk = keystore.unlock(_keystore_path(args), _ask_password())
     try:
-        # Plaintext goes to a private temp file and is published only if
-        # every chunk authenticates; otherwise the temp file is removed.
         with open_input(src_path) as src, safe_output(out, args.force) as dst:
             n = fileformat.decrypt_stream(mk, src, dst)
     finally:
@@ -96,9 +125,10 @@ def cmd_decrypt(args):
 
 
 def cmd_verify(args):
+    src_path = _validate_path(args.file, must_exist=True)
     mk = keystore.unlock(_keystore_path(args), _ask_password())
     try:
-        with open_input(Path(args.file)) as src:
+        with open_input(src_path) as src:
             n = fileformat.decrypt_stream(mk, src, _NullWriter())
     finally:
         wipe(mk)
@@ -106,7 +136,8 @@ def cmd_verify(args):
 
 
 def cmd_info(args):
-    with open_input(Path(args.file)) as src:
+    src_path = _validate_path(args.file, must_exist=True)
+    with open_input(src_path) as src:
         h = fileformat.read_header(src)
     print(f"format version : {h['version']}")
     print(f"file id        : {h['file_id'].hex()}")

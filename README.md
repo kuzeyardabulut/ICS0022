@@ -97,4 +97,38 @@ and disables core dumps, but this is best effort.
 ## Status
 
 - [x] Checkpoint 1: design, threat model, repository, working core with tests
+- [x] Checkpoint 2: core requirements implemented — CLI, encryption, auth, input validation
 - [ ] Next: directory encryption, hardening, security testing
+
+## Progress notes
+
+### Checkpoint 2 (core requirements implemented)
+
+All planned commands are working: `init`, `encrypt`, `decrypt`, `verify`,
+`info`, `passwd`. The CLI parses arguments with `argparse`, validates file
+paths and command arguments before touching keys or files, and reads the
+master password from the terminal with no echo.
+
+**Encryption / decryption.** Files are encrypted with AES-256-GCM using a
+random per-file key (DEK). The DEK is wrapped with the master key, which is
+stored in a keystore encrypted with Argon2id. Streaming chunked encryption
+handles files of any size and detects modification, truncation, reordering
+and appended data.
+
+**Authentication.** The master password is verified by attempting to unwrap
+the master key with Argon2id + AES-256-GCM. No password hash is stored
+separately — a wrong password produces an `InvalidTag` error. KDF
+parameters are checked against OWASP minimums so an attacker cannot
+downgrade them by editing the keystore.
+
+**Input validation.** Paths are checked for null bytes, emptiness and
+length limits. Missing files are caught before the password prompt.
+Double-encryption (encrypting a `.sfm` file) and self-overwrite (output
+equals input) are rejected. Output directory existence is verified up front.
+Symlink inputs and outputs are blocked. Existing files are never overwritten
+without `--force`.
+
+**Tests.** 24 pytest tests cover round-trip encryption at multiple sizes,
+wrong-password rejection, four tampering scenarios, KDF downgrade
+protection, overwrite safety, symlink blocking, permissions, password
+changes and all new validation checks.

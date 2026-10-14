@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -134,3 +135,64 @@ def test_weak_password_rejected(env):
     tmp, answers = env
     answers += ["short"]
     assert main(["init"]) == 1
+
+
+# --- input validation ---
+
+def test_empty_path_rejected(env):
+    tmp, answers = env
+    init(answers)
+    answers.append(PW)
+    assert main(["encrypt", ""]) == 1
+
+
+def test_null_byte_in_path_rejected(env):
+    tmp, answers = env
+    init(answers)
+    answers.append(PW)
+    assert main(["encrypt", "file\x00.txt"]) == 1
+
+
+def test_nonexistent_file_rejected(env):
+    tmp, answers = env
+    init(answers)
+    answers.append(PW)
+    assert main(["encrypt", str(tmp / "no-such-file.txt")]) == 1
+
+
+def test_double_encrypt_rejected(env):
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    encrypt(answers, tmp / "a.txt")
+    answers.append(PW)
+    assert main(["encrypt", str(tmp / "a.txt.sfm")]) == 1
+
+
+def test_output_same_as_input_rejected(env):
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    answers.append(PW)
+    assert main(["encrypt", str(tmp / "a.txt"), "-o", str(tmp / "a.txt")]) == 1
+
+
+def test_output_dir_must_exist(env):
+    tmp, answers = env
+    init(answers)
+    (tmp / "a.txt").write_text("x")
+    answers.append(PW)
+    assert main(["encrypt", str(tmp / "a.txt"), "-o",
+                 str(tmp / "nodir" / "out.sfm")]) == 1
+
+
+def test_verify_nonexistent_rejected(env):
+    tmp, answers = env
+    init(answers)
+    answers.append(PW)
+    assert main(["verify", str(tmp / "nope.sfm")]) == 1
+
+
+def test_info_nonexistent_rejected(env):
+    _, answers = env
+    assert main(["info", str(Path("/tmp/no-such.sfm"))]) == 1
